@@ -5,52 +5,22 @@
 #include <bluetoothapis.h>
 #include <iostream>
 #include <iomanip>
+#include <string>
 #include <unordered_map>
 #include <algorithm>
 #include <cctype>
+#include <thread>
+#include <chrono>
 #include <functional>
 #include "btplus.h"
 
 #pragma comment(lib, "Bthprops.lib")
 #pragma comment(lib, "Ws2_32.lib")
+#pragma warning(disable : 4996)
 
-int main(int argc, char* argv[])
-{
-    if (argc < 2) {
-        ShowHelp();
-        return 1;
-    }
-
-    std::string command = argv[1];
-
-    if ((command == "-show" || command == "-connect" || command == "-disconnect") && argc != 3) {
-        ShowHelp();
-        return 1;
-    }
-
-    if (command == "-showall") {
-        GetDevices("");
-    }
-    else if (command == "-show") {
-        GetDevices(ToLower(argv[2]));
-    }
-    else if (command == "-connect") {
-        ConnectDeviceByName(ToLower(argv[2]));
-    }
-    else if (command == "-disconnect") {
-        DisconnectDeviceByName(ToLower(argv[2]));
-    }
-    else if (command == "-help") {
-        ShowHelp();
-    }
-    else {
-        std::cerr << "Invalid command" << std::endl;
-        ShowHelp();
-        return 0;
-    }
-
-    return 0;
-}
+SERVICE_STATUS g_ServiceStatus = { 0 };
+SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
+HANDLE g_ServiceStopEvent = NULL;
 
 BLUETOOTH_DEVICE_SEARCH_PARAMS CreateSearchParams(BOOL returnAuthenticated, BOOL returnUnknown)
 {
@@ -82,6 +52,14 @@ std::string WStrToStr(const WCHAR* wstr)
     return str;
 }
 
+LPWSTR charArrToLpwstr(const char charArr[]) {
+    wchar_t w_str[20];
+    mbstowcs(w_str, charArr, strlen(charArr) + 1);
+    LPWSTR lpw_str = w_str;
+
+    return lpw_str;
+}
+
 std::string ToLower(const std::string& str)
 {
     std::string lowerStr = str;
@@ -89,50 +67,24 @@ std::string ToLower(const std::string& str)
     return lowerStr;
 }
 
-void ShowHelp()
+void LogEvent(WORD type, const std::string& message)
 {
-    std::cout << "btplus Usage: 'btplus [-showall] [-show <device_name>] [-connect <device_name>] [-disconnect <device_name]'" << std::endl;
-    std::cout << "\t[-showall]                 : Display all remembered or connected devices" << std::endl;
-    std::cout << "\t[-show <device_name>]      : Display all remembered or connected devices that contain/match the <device_name>" << std::endl;
-    std::cout << "\t[-connect <device_name>]   : Connect device that contains/matches the <device_name>" << std::endl;
-    std::cout << "\t[-disconnect <device_name>]: Disconnect device that contains/matches the <device_name>" << std::endl;
-}
-
-void DisplayDevices(const std::unordered_map<std::wstring, BLUETOOTH_DEVICE_INFO>& devices_map, const std::string& device_name)
-{
-    bool is_device_printed = false;
-
-    std::cout << std::left << std::setw(30) << "Device Name"
-        << std::setw(20) << "Device Address"
-        << std::setw(15) << "Connected"
-        << std::setw(15) << "Remembered"
-        << std::setw(15) << "Authenticated"
-        << std::endl;
-
-    std::cout << std::string(100, '-') << std::endl;
-
-    for (const auto& pair : devices_map) {
-        if (pair.first.empty()) {
-            continue;
-        }
-
-        if (!device_name.empty() && ToLower(WStrToStr(pair.first.c_str())).find(device_name) == std::string::npos) {
-            continue;
-        }
-
-        const auto& device = pair.second;
-        std::wcout << std::left << std::setw(30) << pair.first
-            << std::setw(20) << device.Address.ullLong
-            << std::setw(15) << (device.fConnected ? L"Yes" : L"No")
-            << std::setw(15) << (device.fRemembered ? L"Yes" : L"No")
-            << std::setw(15) << (device.fAuthenticated ? L"Yes" : L"No")
-            << std::endl;
-
-        is_device_printed = true;
-    }
-
-    if (!is_device_printed) {
-        std::cout << "NO DEVICES FOUND" << (!device_name.empty() ? " THAT MATCH " + device_name : "") << std::endl;
+    HANDLE hEventSource = RegisterEventSource(NULL, charArrToLpwstr("btplus"));
+    if (hEventSource != NULL) {
+        std::wstring wmessage(message.begin(), message.end());
+        const wchar_t* messages[1] = { wmessage.c_str() };
+        ReportEventW(
+            hEventSource,
+            type,
+            0,
+            0,
+            NULL,
+            1,
+            0,
+            messages,
+            NULL
+        );
+        DeregisterEventSource(hEventSource);
     }
 }
 
@@ -155,40 +107,43 @@ void EnumerateDevices(std::function<void(BLUETOOTH_DEVICE_INFO&)> callback, BOOL
     BluetoothFindDeviceClose(hFind);
 }
 
-void GetDevices(std::string device_name)
+void MonitorDevice(const std::string device_name)
 {
-    std::unordered_map<std::wstring, BLUETOOTH_DEVICE_INFO> devices_map;
-    EnumerateDevices([&](BLUETOOTH_DEVICE_INFO& device_info) {
-        devices_map[device_info.szName] = device_info;
+    while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0) {
+        bool isConnected = false;
+        bool found = false;
+        ULONGLONG btAddr = 0;
+
+        EnumerateDevices([&](BLUETOOTH_DEVICE_INFO& device_info) {
+            std::string current_device_name = WStrToStr(device_info.szName);
+            if (ToLower(current_device_name) == ToLower(device_name)) {
+                found = true;
+                if (device_info.fConnected) {
+                    LogEvent(EVENTLOG_INFORMATION_TYPE, "Device " + device_name + " is already connected. Skipping...");
+                    isConnected = true;
+                }
+                else {
+                    btAddr = device_info.Address.ullLong;
+                    LogEvent(EVENTLOG_INFORMATION_TYPE, "Device " + device_name + " is not connected. Attempting to connect...");
+                }
+            }
         }, TRUE, TRUE);
 
-    DisplayDevices(devices_map, device_name);
+        if (found && !isConnected) {
+            LogEvent(EVENTLOG_INFORMATION_TYPE, "Device " + device_name + " is not connected. Attempting to connect...");
+            ConnectDeviceByAddr(btAddr, device_name);
+        }
+
+        std::this_thread::sleep_for(std::chrono::minutes(2));
+    }
 }
 
-void ConnectDeviceByName(std::string device_name)
+void ConnectDeviceByAddr(ULONGLONG btAddr, const std::string device_name)
 {
     WSADATA wsaData;
     int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (result != 0) {
         std::cerr << "WSAStartup failed: " << result << std::endl;
-        return;
-    }
-
-    ULONGLONG btAddr = 0;
-    bool device_found = false;
-
-    EnumerateDevices([&](BLUETOOTH_DEVICE_INFO& device_info) {
-        std::string current_device_name = WStrToStr(device_info.szName);
-        if (ToLower(current_device_name).find(ToLower(device_name)) != std::string::npos) {
-            device_found = true;
-            btAddr = device_info.Address.ullLong;
-            std::cout << "Matching device found: " << current_device_name << std::endl;
-        }
-        }, TRUE, TRUE);
-
-    if (!device_found) {
-        std::cerr << "Device " << device_name << " not found" << std::endl;
-        WSACleanup();
         return;
     }
 
@@ -213,36 +168,92 @@ void ConnectDeviceByName(std::string device_name)
         return;
     }
 
-    std::cout << "Successfully connected to " << device_name << std::endl;
+    LogEvent(EVENTLOG_INFORMATION_TYPE, "Successfully connected to " + device_name);
 
     closesocket(bt_socket);
     WSACleanup();
 }
 
-void DisconnectDeviceByName(std::string device_name)
+void ServiceWorkerThread(const std::string device_name)
 {
-    bool device_found = false;
+    MonitorDevice(device_name);
+}
 
-    EnumerateDevices([&](BLUETOOTH_DEVICE_INFO& device_info) {
-        std::string current_device_name = WStrToStr(device_info.szName);
-        if (ToLower(current_device_name).find(device_name) != std::string::npos) {
-            if (!device_info.fConnected) {
-                std::cout << "Device " << current_device_name << " is already disconnected" << std::endl;
-                return;
-            }
-
-            if (BluetoothRemoveDevice(&device_info.Address) == ERROR_SUCCESS) {
-                std::cout << "Successfully disconnected " << current_device_name << std::endl;
-            }
-            else {
-                std::cerr << "Error disconnecting from " << current_device_name << std::endl;
-            }
-
-            device_found = true;
+void WINAPI ServiceCtrlHandler(DWORD CtrlCode)
+{
+    switch (CtrlCode) {
+    case SERVICE_CONTROL_STOP:
+        if (g_ServiceStatus.dwCurrentState != SERVICE_RUNNING) {
+            break;
         }
-        }, TRUE, TRUE);
+        g_ServiceStatus.dwControlsAccepted = 0;
+        g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
 
-    if (!device_found) {
-        std::cerr << "Device " << device_name << " not found" << std::endl;
+        SetEvent(g_ServiceStopEvent);
+        break;
+    default:
+        break;
     }
+}
+
+void WINAPI ServiceMain(DWORD argc, LPSTR* argv)
+{
+    g_StatusHandle = RegisterServiceCtrlHandlerW(charArrToLpwstr("btplus"), ServiceCtrlHandler);
+    if (g_StatusHandle == NULL) {
+        return;
+    }
+
+    g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
+    g_ServiceStatus.dwControlsAccepted = 0;
+    g_ServiceStatus.dwWin32ExitCode = 0;
+    g_ServiceStatus.dwServiceSpecificExitCode = 0;
+    g_ServiceStatus.dwCheckPoint = 0;
+
+    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+
+    g_ServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (g_ServiceStopEvent == NULL) {
+        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceStatus.dwWin32ExitCode = GetLastError();
+        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+        LogEvent(EVENTLOG_ERROR_TYPE, "Failed to start 'btplus'. Exiting...");
+        return;
+    }
+
+    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+
+    const std::string target_device = "Arctis Nova 7";
+    std::thread worker_thread(ServiceWorkerThread, target_device);
+
+    WaitForSingleObject(g_ServiceStopEvent, INFINITE);
+
+    worker_thread.join();
+
+    CloseHandle(g_ServiceStopEvent);
+
+    g_ServiceStatus.dwControlsAccepted = 0;
+    g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+    g_ServiceStatus.dwWin32ExitCode = 0;
+    g_ServiceStatus.dwCheckPoint = 3;
+    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+    LogEvent(EVENTLOG_INFORMATION_TYPE, "'btplus' started successfully.");
+}
+
+int main()
+{
+    LogEvent(EVENTLOG_INFORMATION_TYPE, "Starting 'btplus'...");
+    SERVICE_TABLE_ENTRY ServiceTable[] = {
+        {charArrToLpwstr("btplus"), (LPSERVICE_MAIN_FUNCTION)ServiceMain},
+        {NULL, NULL}
+    };
+
+    if (StartServiceCtrlDispatcher(ServiceTable) == FALSE) {
+        return GetLastError();
+    }
+
+    return 0;
 }
