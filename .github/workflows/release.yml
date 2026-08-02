@@ -1,0 +1,78 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create a GitHub Release
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─── C++ Build ────────────────────────────────────────────────────────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build btplus.exe (Release | x64)
+        run: |
+          msbuild btplus.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /m `
+            /nologo
+
+      # ─── MSI Installer ────────────────────────────────────────────────────
+      - name: Install WiX v4
+        run: |
+          dotnet tool install --global wix
+          wix extension add WixToolset.UI.wixext
+          wix extension add WixToolset.Util.wixext
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $tag     = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+
+          wix build `
+            installer/btplus.wxs `
+            installer/BtConfigDlg.wxs `
+            -ext WixToolset.UI.wixext `
+            -ext WixToolset.Util.wixext `
+            -d Version=$version `
+            -o "btplus-$tag.msi"
+
+          Write-Host "Built btplus-$tag.msi"
+
+      # ─── Portable ZIP (manual / no-wizard option) ─────────────────────────
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $tag  = "${{ github.ref_name }}"
+          $dest = "dist"
+
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          Copy-Item "x64\Release\btplus.exe" "$dest\"
+          Copy-Item "btplus.ini"             "$dest\"
+          Copy-Item "install.ps1"            "$dest\"
+          Copy-Item "README.md"              "$dest\"
+
+          Compress-Archive -Path "$dest\*" -DestinationPath "btplus-$tag-portable.zip"
+          Write-Host "Packaged btplus-$tag-portable.zip"
+
+      # ─── GitHub Release ───────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: btplus ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            btplus-${{ github.ref_name }}.msi
+            btplus-${{ github.ref_name }}-portable.zip

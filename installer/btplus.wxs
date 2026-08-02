@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  btplus WiX v4 Installer
+  Build with:
+    wix build installer/btplus.wxs installer/BtConfigDlg.wxs
+      -ext WixToolset.UI.wixext
+      -ext WixToolset.Util.wixext
+      -d Version=1.0.0
+      -o btplus.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="btplus"
+           Manufacturer="btplus"
+           Version="$(var.Version)"
+           UpgradeCode="F7E8D9C0-B1A2-3456-7890-ABCDEF012345"
+           Scope="perMachine">
+
+    <!--
+      Automatically handles upgrade scenarios:
+      - Replaces older versions silently
+      - Blocks downgrades with a friendly error message
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of btplus is already installed." />
+
+    <!-- ─── User-configurable properties (populated by the wizard) ──────────
+         DEVICE_NAME and POLL_INTERVAL_SECONDS are shown as editable fields
+         in BtConfigDlg and written to btplus.ini via IniFile elements below.
+    ────────────────────────────────────────────────────────────────────────── -->
+    <Property Id="DEVICE_NAME"           Value="Arctis Nova 7" />
+    <Property Id="POLL_INTERVAL_SECONDS" Value="30" />
+
+    <!-- ─── Install directory ────────────────────────────────────────────── -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="btplus" />
+    </StandardDirectory>
+
+    <!-- ─── Main component: executable + INI file ───────────────────────── -->
+    <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainComponent">
+        <!--
+          btplus.exe is the key path for this component.
+          The IniFile elements write btplus.ini using WritePrivateProfileString
+          during the WriteIniValues action, resolving DEVICE_NAME and
+          POLL_INTERVAL_SECONDS from the wizard-configured properties.
+        -->
+        <File Id="BtplusExe" Source="..\x64\Release\btplus.exe" KeyPath="yes" />
+
+        <IniFile Id="IniSectionDevice"
+                 Action="addLine"
+                 Name="btplus.ini"
+                 Section="btplus"
+                 Key="device"
+                 Value="[DEVICE_NAME]" />
+
+        <IniFile Id="IniSectionPoll"
+                 Action="addLine"
+                 Name="btplus.ini"
+                 Section="btplus"
+                 Key="poll_interval_seconds"
+                 Value="[POLL_INTERVAL_SECONDS]" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ─── PATH environment variable ───────────────────────────────────── -->
+    <ComponentGroup Id="PathComponents" Directory="INSTALLFOLDER">
+      <Component Id="PathComponent" Guid="A1B2C3D4-E5F6-7890-ABCD-EF0123456789">
+        <!--
+          Registry key serves as the component key path (IniFile/Environment
+          elements cannot be key paths on their own).
+        -->
+        <RegistryValue Root="HKLM"
+                       Key="Software\btplus"
+                       Name="Installed"
+                       Value="1"
+                       Type="integer"
+                       KeyPath="yes" />
+
+        <!-- Appends [INSTALLFOLDER] to the system PATH. Removed on uninstall. -->
+        <Environment Id="SystemPath"
+                     Name="PATH"
+                     Value="[INSTALLFOLDER]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ─── Feature ─────────────────────────────────────────────────────── -->
+    <Feature Id="ProductFeature" Title="btplus" Level="1">
+      <ComponentGroupRef Id="MainComponents" />
+      <ComponentGroupRef Id="PathComponents" />
+    </Feature>
+
+    <!-- ─── Custom Actions: Scheduled Task ──────────────────────────────────
+         WiX pattern for deferred CAs that need resolved property values:
+           1. SetProperty runs immediately (all public props available) and
+              stores the full command string as the CA_* property.
+           2. The deferred CA reads that property via CustomActionData and
+              passes it to WixQuietExec, which executes it silently.
+
+         Return="ignore" on stop/remove because the task may not exist
+         (e.g., first install or task was manually deleted).
+    ────────────────────────────────────────────────────────────────────────── -->
+
+    <!-- Register task on fresh install -->
+    <SetProperty Id="CA_RegisterTask"
+                 Sequence="execute"
+                 Before="CA_RegisterTask"
+                 Value="&quot;[SystemFolder]schtasks.exe&quot; /Create /TN &quot;btplus&quot; /TR &quot;[INSTALLFOLDER]btplus.exe&quot; /SC ONLOGON /RL HIGHEST /F" />
+
+    <CustomAction Id="CA_RegisterTask"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!-- Stop any running btplus instance before uninstall/upgrade -->
+    <SetProperty Id="CA_StopTask"
+                 Sequence="execute"
+                 Before="CA_StopTask"
+                 Value="&quot;[SystemFolder]schtasks.exe&quot; /End /TN &quot;btplus&quot;" />
+
+    <CustomAction Id="CA_StopTask"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Delete the scheduled task on uninstall/upgrade -->
+    <SetProperty Id="CA_RemoveTask"
+                 Sequence="execute"
+                 Before="CA_RemoveTask"
+                 Value="&quot;[SystemFolder]schtasks.exe&quot; /Delete /TN &quot;btplus&quot; /F" />
+
+    <CustomAction Id="CA_RemoveTask"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- ─── Execute Sequence ─────────────────────────────────────────────── -->
+    <InstallExecuteSequence>
+      <!-- Fresh install: register the startup task once files are in place -->
+      <Custom Action="CA_RegisterTask"
+              Before="InstallFinalize"
+              Condition="NOT Installed" />
+
+      <!--
+        Uninstall/upgrade path:
+          Stop the running instance first, then delete the task before files
+          are removed (so the exe is still present for schtasks to reference).
+          UPGRADINGPRODUCTCODE is set when a newer version is replacing us —
+          the new installer will re-register the task, so we skip the remove.
+      -->
+      <Custom Action="CA_StopTask"
+              Before="RemoveFiles"
+              Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="CA_RemoveTask"
+              After="CA_StopTask"
+              Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <!-- ─── UI ───────────────────────────────────────────────────────────────
+         WixUI_InstallDir provides:
+           WelcomeDlg → InstallDirDlg → VerifyReadyDlg → ProgressDlg → ExitDlg
+
+         We inject BtConfigDlg between WelcomeDlg and InstallDirDlg using
+         Order=9999, which fires after WixUI's built-in Publish entries and
+         wins as the last NewDialog event evaluated by MSI.
+    ────────────────────────────────────────────────────────────────────────── -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER">
+      <!-- WelcomeDlg Next → BtConfigDlg (instead of InstallDirDlg) -->
+      <Publish Dialog="WelcomeDlg"
+               Control="Next"
+               Event="NewDialog"
+               Value="BtConfigDlg"
+               Order="9999" />
+
+      <!-- InstallDirDlg Back → BtConfigDlg (instead of WelcomeDlg) -->
+      <Publish Dialog="InstallDirDlg"
+               Control="Back"
+               Event="NewDialog"
+               Value="BtConfigDlg"
+               Order="9999" />
+    </ui:WixUI>
+
+  </Package>
+</Wix>

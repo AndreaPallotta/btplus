@@ -1,259 +1,364 @@
 #define WIN32_LEAN_AND_MEAN
-#include <WinSock2.h>
-#include <ws2bth.h>
 #include <Windows.h>
 #include <bluetoothapis.h>
-#include <iostream>
-#include <iomanip>
+#include <bthdef.h>
+#include <shellapi.h>
+#include <dbt.h>
 #include <string>
-#include <unordered_map>
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <thread>
 #include <chrono>
-#include <functional>
-#include "btplus.h"
+#include <atomic>
 
 #pragma comment(lib, "Bthprops.lib")
-#pragma comment(lib, "Ws2_32.lib")
-#pragma warning(disable : 4996)
+#pragma comment(lib, "Shell32.lib")
 
-SERVICE_STATUS g_ServiceStatus = { 0 };
-SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
-HANDLE g_ServiceStopEvent = NULL;
+// ─── Constants ───────────────────────────────────────────────────────────────
 
-BLUETOOTH_DEVICE_SEARCH_PARAMS CreateSearchParams(BOOL returnAuthenticated, BOOL returnUnknown)
-{
-    BLUETOOTH_DEVICE_SEARCH_PARAMS search_params;
-    search_params.dwSize = sizeof(BLUETOOTH_DEVICE_SEARCH_PARAMS);
-    search_params.fReturnRemembered = TRUE;
-    search_params.fReturnAuthenticated = returnAuthenticated;
-    search_params.fReturnUnknown = returnUnknown;
-    search_params.fIssueInquiry = FALSE;
-    search_params.cTimeoutMultiplier = 1;
-    search_params.hRadio = NULL;
+// Custom window messages
+#define WM_TRAY_ICON    (WM_APP + 1)
+#define WM_TRY_CONNECT  (WM_APP + 2)
 
-    return search_params;
-}
+// Timer ID for fallback poll
+#define IDT_POLL_TIMER  1
 
-BLUETOOTH_DEVICE_INFO CreateDeviceInfo()
-{
-    BLUETOOTH_DEVICE_INFO device_info;
-    device_info.dwSize = sizeof(BLUETOOTH_DEVICE_INFO);
+static const int DEFAULT_POLL_SECONDS = 30;
+static const int MAX_RETRIES          = 3;
+static const int RETRY_DELAY_SECONDS  = 10;
 
-    return device_info;
-}
+// Bluetooth port device interface GUID for RegisterDeviceNotification.
+// {0850302A-9527-4572-8003-1AA9C4C7C64D}
+static const GUID GUID_BTHPORT_DEVICE_INTERFACE = {
+    0x0850302A, 0x9527, 0x4572,
+    { 0x80, 0x03, 0x1A, 0xA9, 0xC4, 0xC7, 0xC6, 0x4D }
+};
+
+// ─── Globals ─────────────────────────────────────────────────────────────────
+
+static std::string       g_DeviceName;
+static int               g_PollIntervalMs = DEFAULT_POLL_SECONDS * 1000;
+static HWND              g_hWnd           = NULL;
+static HDEVNOTIFY        g_hDevNotify     = NULL;
+static std::atomic<bool> g_ConnectBusy    { false };
+
+// ─── Utility ─────────────────────────────────────────────────────────────────
 
 std::string WStrToStr(const WCHAR* wstr)
 {
-    int length = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
-    std::string str(length, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &str[0], length, NULL, NULL);
-    return str;
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+    std::string s(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &s[0], len, NULL, NULL);
+    return s;
 }
 
-LPWSTR charArrToLpwstr(const char charArr[]) {
-    wchar_t w_str[20];
-    mbstowcs(w_str, charArr, strlen(charArr) + 1);
-    LPWSTR lpw_str = w_str;
-
-    return lpw_str;
+std::wstring StrToWStr(const std::string& str)
+{
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, NULL, 0);
+    std::wstring ws(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &ws[0], len);
+    return ws;
 }
 
 std::string ToLower(const std::string& str)
 {
-    std::string lowerStr = str;
-    std::transform(lowerStr.begin(), lowerStr.end(), lowerStr.begin(), [](unsigned char c) { return std::tolower(c); });
-    return lowerStr;
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+        [](unsigned char c) { return std::tolower(c); });
+    return lower;
 }
 
-void LogEvent(WORD type, const std::string& message)
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+struct Config
 {
-    HANDLE hEventSource = RegisterEventSource(NULL, charArrToLpwstr("btplus"));
-    if (hEventSource != NULL) {
-        std::wstring wmessage(message.begin(), message.end());
-        const wchar_t* messages[1] = { wmessage.c_str() };
-        ReportEventW(
-            hEventSource,
-            type,
-            0,
-            0,
-            NULL,
-            1,
-            0,
-            messages,
-            NULL
-        );
-        DeregisterEventSource(hEventSource);
-    }
+    std::string deviceName;
+    int         pollIntervalSeconds = DEFAULT_POLL_SECONDS;
+};
+
+Config ReadConfig()
+{
+    Config cfg;
+
+    // Resolve btplus.ini path relative to the executable
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(path, L'\\');
+    if (lastSlash) *(lastSlash + 1) = L'\0';
+    wcscat_s(path, L"btplus.ini");
+
+    wchar_t buf[256] = {};
+    GetPrivateProfileStringW(L"btplus", L"device", L"", buf, 256, path);
+    cfg.deviceName = WStrToStr(buf);
+
+    int secs = (int)GetPrivateProfileIntW(
+        L"btplus", L"poll_interval_seconds", DEFAULT_POLL_SECONDS, path);
+    cfg.pollIntervalSeconds = max(secs, 5); // enforce a minimum of 5 seconds
+
+    return cfg;
 }
 
-void EnumerateDevices(std::function<void(BLUETOOTH_DEVICE_INFO&)> callback, BOOL returnAuthenticated, BOOL returnUnknown)
+// ─── Notifications ───────────────────────────────────────────────────────────
+
+// Show a Windows tray balloon notification (surfaces as a modern Action Center
+// toast on Windows 10/11). flags: NIIF_INFO, NIIF_WARNING, or NIIF_ERROR.
+void ShowNotification(const std::wstring& title, const std::wstring& body, DWORD flags)
 {
-    BLUETOOTH_DEVICE_SEARCH_PARAMS search_params = CreateSearchParams(returnAuthenticated, returnUnknown);
-    BLUETOOTH_DEVICE_INFO device_info = CreateDeviceInfo();
+    if (!g_hWnd) return;
 
-    HBLUETOOTH_DEVICE_FIND hFind = BluetoothFindFirstDevice(&search_params, &device_info);
-    if (hFind == NULL) {
-        DWORD error = GetLastError();
-        std::cerr << "Error finding devices: " << error << std::endl;
-        return;
-    }
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize      = sizeof(nid);
+    nid.hWnd        = g_hWnd;
+    nid.uID         = 1;
+    nid.uFlags      = NIF_INFO;
+    nid.dwInfoFlags = flags | NIIF_NOSOUND;
+    nid.uTimeout    = 6000;
+    wcsncpy_s(nid.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo,      body.c_str(),  _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
 
-    do {
-        callback(device_info);
-    } while (BluetoothFindNextDevice(hFind, &device_info));
+// ─── Bluetooth ───────────────────────────────────────────────────────────────
 
+void EnumerateDevices(std::function<void(BLUETOOTH_DEVICE_INFO&)> callback,
+                      BOOL returnAuthenticated, BOOL returnUnknown)
+{
+    BLUETOOTH_DEVICE_SEARCH_PARAMS params = {};
+    params.dwSize              = sizeof(params);
+    params.fReturnRemembered   = TRUE;
+    params.fReturnAuthenticated = returnAuthenticated;
+    params.fReturnUnknown      = returnUnknown;
+    params.fIssueInquiry       = FALSE;
+    params.cTimeoutMultiplier  = 1;
+    params.hRadio              = NULL;
+
+    BLUETOOTH_DEVICE_INFO info = {};
+    info.dwSize = sizeof(info);
+
+    HBLUETOOTH_DEVICE_FIND hFind = BluetoothFindFirstDevice(&params, &info);
+    if (!hFind) return;
+
+    do { callback(info); } while (BluetoothFindNextDevice(hFind, &info));
     BluetoothFindDeviceClose(hFind);
 }
 
-void MonitorDevice(const std::string device_name)
+// Activate the A2DP (stereo audio) and HFP (hands-free/mic) profiles.
+// Returns true if at least one profile was enabled successfully.
+bool EnableAudioProfiles(BLUETOOTH_DEVICE_INFO& info)
 {
-    while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0) {
-        bool isConnected = false;
-        bool found = false;
-        ULONGLONG btAddr = 0;
+    bool ok = false;
+    if (BluetoothSetServiceState(NULL, &info, &AudioSinkServiceClass_UUID,
+        BLUETOOTH_SERVICE_ENABLE) == ERROR_SUCCESS) ok = true;
+    if (BluetoothSetServiceState(NULL, &info, &HandsFreeServiceClass_UUID,
+        BLUETOOTH_SERVICE_ENABLE) == ERROR_SUCCESS) ok = true;
+    return ok;
+}
 
-        EnumerateDevices([&](BLUETOOTH_DEVICE_INFO& device_info) {
-            std::string current_device_name = WStrToStr(device_info.szName);
-            if (ToLower(current_device_name) == ToLower(device_name)) {
+// Background thread: locate the target device and connect it with retries.
+// Posts a success or failure toast when done.
+void ConnectThread(std::string device_name)
+{
+    for (int attempt = 1; attempt <= MAX_RETRIES; ++attempt)
+    {
+        bool found       = false;
+        bool alreadyConn = false;
+        BLUETOOTH_DEVICE_INFO target = {};
+        target.dwSize = sizeof(target);
+
+        EnumerateDevices([&](BLUETOOTH_DEVICE_INFO& info) {
+            if (ToLower(WStrToStr(info.szName)) == ToLower(device_name)) {
                 found = true;
-                if (device_info.fConnected) {
-                    LogEvent(EVENTLOG_INFORMATION_TYPE, "Device " + device_name + " is already connected. Skipping...");
-                    isConnected = true;
-                }
-                else {
-                    btAddr = device_info.Address.ullLong;
-                    LogEvent(EVENTLOG_INFORMATION_TYPE, "Device " + device_name + " is not connected. Attempting to connect...");
-                }
+                if (info.fConnected) alreadyConn = true;
+                else                 target = info;
             }
         }, TRUE, TRUE);
 
-        if (found && !isConnected) {
-            LogEvent(EVENTLOG_INFORMATION_TYPE, "Device " + device_name + " is not connected. Attempting to connect...");
-            ConnectDeviceByAddr(btAddr, device_name);
+        // Already connected, or device isn't in the paired list yet — nothing to do.
+        if (!found || alreadyConn) {
+            g_ConnectBusy = false;
+            return;
         }
 
-        std::this_thread::sleep_for(std::chrono::minutes(2));
-    }
-}
-
-void ConnectDeviceByAddr(ULONGLONG btAddr, const std::string device_name)
-{
-    WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
-        std::cerr << "WSAStartup failed: " << result << std::endl;
-        return;
-    }
-
-    SOCKET bt_socket = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
-    if (bt_socket == INVALID_SOCKET) {
-        std::cerr << "Error creating socket: " << WSAGetLastError() << std::endl;
-        WSACleanup();
-        return;
-    }
-
-    SOCKADDR_BTH sock_addr = { 0 };
-    sock_addr.addressFamily = AF_BTH;
-    sock_addr.btAddr = btAddr;
-    sock_addr.serviceClassId = RFCOMM_PROTOCOL_UUID;
-    sock_addr.port = BT_PORT_ANY;
-
-    result = connect(bt_socket, (SOCKADDR*)&sock_addr, sizeof(sock_addr));
-    if (result == SOCKET_ERROR) {
-        std::cerr << "Error connecting to device: " << WSAGetLastError() << std::endl;
-        closesocket(bt_socket);
-        WSACleanup();
-        return;
-    }
-
-    LogEvent(EVENTLOG_INFORMATION_TYPE, "Successfully connected to " + device_name);
-
-    closesocket(bt_socket);
-    WSACleanup();
-}
-
-void ServiceWorkerThread(const std::string device_name)
-{
-    MonitorDevice(device_name);
-}
-
-void WINAPI ServiceCtrlHandler(DWORD CtrlCode)
-{
-    switch (CtrlCode) {
-    case SERVICE_CONTROL_STOP:
-        if (g_ServiceStatus.dwCurrentState != SERVICE_RUNNING) {
-            break;
+        if (EnableAudioProfiles(target)) {
+            ShowNotification(
+                L"Bluetooth Connected",
+                StrToWStr(device_name) + L" connected successfully.",
+                NIIF_INFO);
+            g_ConnectBusy = false;
+            return;
         }
-        g_ServiceStatus.dwControlsAccepted = 0;
-        g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
 
-        SetEvent(g_ServiceStopEvent);
-        break;
+        // Connection failed — wait before the next attempt, unless this was the last one.
+        if (attempt < MAX_RETRIES) {
+            std::this_thread::sleep_for(std::chrono::seconds(RETRY_DELAY_SECONDS));
+        }
+    }
+
+    // All retries exhausted
+    ShowNotification(
+        L"Bluetooth \u2014 Connection Failed",
+        L"Could not connect " + StrToWStr(device_name) +
+        L" after " + std::to_wstring(MAX_RETRIES) + L" attempts.",
+        NIIF_ERROR);
+
+    g_ConnectBusy = false;
+}
+
+// Spawns a ConnectThread if one isn't already running (atomic guard).
+void TriggerConnect()
+{
+    bool expected = false;
+    if (!g_ConnectBusy.compare_exchange_strong(expected, true)) return;
+    std::thread(ConnectThread, g_DeviceName).detach();
+}
+
+// ─── Window / Message Loop ───────────────────────────────────────────────────
+
+void AddTrayIcon(HWND hWnd)
+{
+    NOTIFYICONDATAW nid  = {};
+    nid.cbSize           = sizeof(nid);
+    nid.hWnd             = hWnd;
+    nid.uID              = 1;
+    nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE | NIF_SHOWTIP;
+    nid.uCallbackMessage = WM_TRAY_ICON;
+    nid.hIcon            = LoadIconW(NULL, IDI_APPLICATION);
+    wcsncpy_s(nid.szTip, L"btplus \u2014 Bluetooth Auto-Connect", _TRUNCATE);
+    Shell_NotifyIconW(NIM_ADD, &nid);
+
+    // Enable NOTIFYICON_VERSION_4 for modern balloon-to-toast behavior
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &nid);
+}
+
+void RemoveTrayIcon(HWND hWnd)
+{
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd   = hWnd;
+    nid.uID    = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        g_hWnd = hWnd;
+        AddTrayIcon(hWnd);
+
+        // Subscribe to Bluetooth device-arrival events so we can react
+        // the instant the headphones are detected, rather than waiting for
+        // the next poll cycle.
+        DEV_BROADCAST_DEVICEINTERFACE_W dbi = {};
+        dbi.dbcc_size       = sizeof(dbi);
+        dbi.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+        dbi.dbcc_classguid  = GUID_BTHPORT_DEVICE_INTERFACE;
+        g_hDevNotify = RegisterDeviceNotificationW(
+            hWnd, &dbi, DEVICE_NOTIFY_WINDOW_HANDLE);
+
+        // Fallback poll timer in case device-change events are missed
+        SetTimer(hWnd, IDT_POLL_TIMER, g_PollIntervalMs, NULL);
+
+        // Run an initial check at startup in case the headphones are
+        // already on but not connected (e.g. PC rebooted)
+        PostMessageW(hWnd, WM_TRY_CONNECT, 0, 0);
+        return 0;
+    }
+
+    case WM_TRY_CONNECT:
+        TriggerConnect();
+        return 0;
+
+    case WM_TIMER:
+        if (wParam == IDT_POLL_TIMER)
+            TriggerConnect();
+        return 0;
+
+    case WM_DEVICECHANGE:
+        // DBT_DEVICEARRIVAL fires when the OS detects a new device on
+        // a registered interface. Trigger an immediate connection check
+        // so the headphones connect without waiting for the poll timer.
+        if (wParam == DBT_DEVICEARRIVAL)
+            PostMessageW(hWnd, WM_TRY_CONNECT, 0, 0);
+        return TRUE;
+
+    case WM_DESTROY:
+        KillTimer(hWnd, IDT_POLL_TIMER);
+        if (g_hDevNotify) {
+            UnregisterDeviceNotification(g_hDevNotify);
+            g_hDevNotify = NULL;
+        }
+        RemoveTrayIcon(hWnd);
+        PostQuitMessage(0);
+        return 0;
+
     default:
-        break;
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
     }
 }
 
-void WINAPI ServiceMain(DWORD argc, LPSTR* argv)
+// ─── Entry Point ─────────────────────────────────────────────────────────────
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
-    g_StatusHandle = RegisterServiceCtrlHandlerW(charArrToLpwstr("btplus"), ServiceCtrlHandler);
-    if (g_StatusHandle == NULL) {
-        return;
+    // Prevent multiple instances from running simultaneously
+    HANDLE hMutex = CreateMutexW(NULL, TRUE, L"btplus_single_instance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hMutex);
+        return 0;
     }
 
-    g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-    g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_ServiceStatus.dwControlsAccepted = 0;
-    g_ServiceStatus.dwWin32ExitCode = 0;
-    g_ServiceStatus.dwServiceSpecificExitCode = 0;
-    g_ServiceStatus.dwCheckPoint = 0;
-
-    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-
-    g_ServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (g_ServiceStopEvent == NULL) {
-        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceStatus.dwWin32ExitCode = GetLastError();
-        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-        LogEvent(EVENTLOG_ERROR_TYPE, "Failed to start 'btplus'. Exiting...");
-        return;
+    // Read btplus.ini from the executable's directory
+    Config cfg = ReadConfig();
+    if (cfg.deviceName.empty()) {
+        MessageBoxW(NULL,
+            L"btplus.ini is missing or has no 'device' key.\n\n"
+            L"Place btplus.ini next to btplus.exe with the following content:\n\n"
+            L"    [btplus]\n"
+            L"    device=Your Headphone Name\n"
+            L"    poll_interval_seconds=30",
+            L"btplus \u2014 Configuration Error",
+            MB_ICONERROR | MB_OK);
+        CloseHandle(hMutex);
+        return 1;
     }
+    g_DeviceName     = cfg.deviceName;
+    g_PollIntervalMs = cfg.pollIntervalSeconds * 1000;
 
-    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
-    g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
-    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-
-    const std::string target_device = "Arctis Nova 7";
-    std::thread worker_thread(ServiceWorkerThread, target_device);
-
-    WaitForSingleObject(g_ServiceStopEvent, INFINITE);
-
-    worker_thread.join();
-
-    CloseHandle(g_ServiceStopEvent);
-
-    g_ServiceStatus.dwControlsAccepted = 0;
-    g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-    g_ServiceStatus.dwWin32ExitCode = 0;
-    g_ServiceStatus.dwCheckPoint = 3;
-    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-    LogEvent(EVENTLOG_INFORMATION_TYPE, "'btplus' started successfully.");
-}
-
-int main()
-{
-    LogEvent(EVENTLOG_INFORMATION_TYPE, "Starting 'btplus'...");
-    SERVICE_TABLE_ENTRY ServiceTable[] = {
-        {charArrToLpwstr("btplus"), (LPSERVICE_MAIN_FUNCTION)ServiceMain},
-        {NULL, NULL}
-    };
-
-    if (StartServiceCtrlDispatcher(ServiceTable) == FALSE) {
+    // Register a minimal window class for our hidden background window
+    WNDCLASSEXW wc   = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInstance;
+    wc.lpszClassName = L"btplus_window";
+    if (!RegisterClassExW(&wc)) {
+        CloseHandle(hMutex);
         return GetLastError();
     }
 
-    return 0;
+    // Create a hidden (never shown) window. A real HWND is required by both
+    // Shell_NotifyIcon and RegisterDeviceNotification.
+    HWND hWnd = CreateWindowExW(
+        0, L"btplus_window", L"btplus",
+        WS_OVERLAPPED, 0, 0, 0, 0,
+        NULL, NULL, hInstance, NULL);
+
+    if (!hWnd) {
+        CloseHandle(hMutex);
+        return GetLastError();
+    }
+
+    // Standard message pump
+    MSG msg = {};
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    CloseHandle(hMutex);
+    return (int)msg.wParam;
 }
