@@ -31,9 +31,9 @@ jobs:
       # ─── MSI Installer ────────────────────────────────────────────────────
       - name: Install WiX v4
         run: |
-          dotnet tool install --global wix
-          wix extension add WixToolset.UI.wixext
-          wix extension add WixToolset.Util.wixext
+          dotnet tool install --global wix --version "4.*"
+          wix extension add WixToolset.UI.wixext/4.*
+          wix extension add WixToolset.Util.wixext/4.*
 
       - name: Build MSI
         shell: pwsh
