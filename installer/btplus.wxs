@@ -46,7 +46,7 @@
           during the WriteIniValues action, resolving DEVICE_NAME and
           POLL_INTERVAL_SECONDS from the wizard-configured properties.
         -->
-        <File Id="BtplusExe" Source="..\x64\Release\btplus.exe" KeyPath="yes" />
+        <File Id="BtplusExe" Source="x64\Release\btplus.exe" KeyPath="yes" />
 
         <IniFile Id="IniSectionDevice"
                  Action="addLine"
@@ -175,21 +175,7 @@
          Order=9999, which fires after WixUI's built-in Publish entries and
          wins as the last NewDialog event evaluated by MSI.
     ────────────────────────────────────────────────────────────────────────── -->
-    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER">
-      <!-- WelcomeDlg Next → BtConfigDlg (instead of InstallDirDlg) -->
-      <ui:Publish Dialog="WelcomeDlg"
-                  Control="Next"
-                  Event="NewDialog"
-                  Value="BtConfigDlg"
-                  Order="9999" />
-
-      <!-- InstallDirDlg Back → BtConfigDlg (instead of WelcomeDlg) -->
-      <ui:Publish Dialog="InstallDirDlg"
-                  Control="Back"
-                  Event="NewDialog"
-                  Value="BtConfigDlg"
-                  Order="9999" />
-    </ui:WixUI>
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
 
   </Package>
 </Wix>

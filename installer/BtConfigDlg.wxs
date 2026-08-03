@@ -12,6 +12,23 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Fragment>
     <UI>
+      <!--
+        Navigation overrides — merged with WixUI_InstallDir's ControlEvent table at link time.
+        Order=9999 ensures these fire last, winning over WixUI's built-in transitions.
+          WelcomeDlg  Next → BtConfigDlg  (was InstallDirDlg)
+          InstallDirDlg Back → BtConfigDlg (was WelcomeDlg)
+      -->
+      <Publish Dialog="WelcomeDlg"
+               Control="Next"
+               Event="NewDialog"
+               Value="BtConfigDlg"
+               Order="9999" />
+      <Publish Dialog="InstallDirDlg"
+               Control="Back"
+               Event="NewDialog"
+               Value="BtConfigDlg"
+               Order="9999" />
+
       <Dialog Id="BtConfigDlg" Width="370" Height="270" Title="[ProductName] Setup">
 
         <!-- ─── Banner (matches standard WiX installer look) ─────────────── -->
