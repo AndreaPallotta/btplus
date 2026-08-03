@@ -24,32 +24,34 @@
                  Type="Line"
                  X="0" Y="44" Width="370" Height="0" />
 
+        <!--
+          WiX v4: Control text for formatted strings (e.g. font overrides) must
+          use a <Text Value="..." /> child element, NOT inner text.
+          Plain text controls use the Text attribute directly on <Control>.
+        -->
         <Control Id="TitleText"
                  Type="Text"
                  X="15" Y="6" Width="340" Height="15"
                  Transparent="yes" NoPrefix="yes">
-          <Text>{\WixUI_Font_Title}Configure btplus</Text>
+          <Text Value="{\WixUI_Font_Title}Configure btplus" />
         </Control>
         <Control Id="SubtitleText"
                  Type="Text"
                  X="15" Y="23" Width="340" Height="15"
-                 Transparent="yes" NoPrefix="yes">
-          <Text>Set your Bluetooth device and connection preferences.</Text>
-        </Control>
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Set your Bluetooth device and connection preferences." />
 
         <!-- ─── Device Name ──────────────────────────────────────────────── -->
         <Control Id="DeviceNameLabel"
                  Type="Text"
                  X="20" Y="58" Width="330" Height="12"
-                 NoPrefix="yes">
-          <Text>&amp;Bluetooth Device Name:</Text>
-        </Control>
+                 NoPrefix="yes"
+                 Text="Bluetooth Device Name:" />
         <Control Id="DeviceNameHint"
                  Type="Text"
                  X="20" Y="71" Width="330" Height="10"
-                 Transparent="yes" NoPrefix="yes">
-          <Text>Enter the exact name shown in Bluetooth Settings (case-insensitive).</Text>
-        </Control>
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Enter the exact name shown in Bluetooth Settings (case-insensitive)." />
         <!--
           Edit control bound to the DEVICE_NAME property.
           Text="{100}" sets the maximum character limit to 100.
@@ -64,18 +66,16 @@
         <Control Id="PollLabel"
                  Type="Text"
                  X="20" Y="118" Width="330" Height="12"
-                 NoPrefix="yes">
-          <Text>&amp;Fallback Poll Interval (seconds):</Text>
-        </Control>
+                 NoPrefix="yes"
+                 Text="Fallback Poll Interval (seconds):" />
         <Control Id="PollHint"
                  Type="Text"
                  X="20" Y="131" Width="330" Height="10"
-                 Transparent="yes" NoPrefix="yes">
-          <Text>Scans for the device when no arrival event fires. Minimum: 5. Default: 30.</Text>
-        </Control>
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Scans for the device when no arrival event fires. Minimum: 5. Default: 30." />
         <!--
           Edit control bound to POLL_INTERVAL_SECONDS.
-          Text="{5}" limits input to 5 characters (enough for "86400").
+          Text="{5}" limits input to 5 characters.
         -->
         <Control Id="PollEdit"
                  Type="Edit"
@@ -89,17 +89,14 @@
                  X="0" Y="234" Width="370" Height="0" />
 
         <!--
-          Back → WelcomeDlg
-          Next → InstallDirDlg
-          Cancel → CancelDlg (confirmation)
-
-          The child text ("1") is the MSI condition — "1" means always execute.
+          WiX v4: Publish conditions must use the Condition attribute.
+          Inner text conditions (WiX v3 style) are no longer supported.
         -->
         <Control Id="Back"
                  Type="PushButton"
                  X="156" Y="243" Width="56" Height="17"
                  Text="!(loc.WixUIBack)">
-          <Publish Event="NewDialog" Value="WelcomeDlg">1</Publish>
+          <Publish Event="NewDialog" Value="WelcomeDlg" Condition="1" />
         </Control>
 
         <Control Id="Next"
@@ -107,7 +104,7 @@
                  X="216" Y="243" Width="56" Height="17"
                  Default="yes"
                  Text="!(loc.WixUINext)">
-          <Publish Event="NewDialog" Value="InstallDirDlg">1</Publish>
+          <Publish Event="NewDialog" Value="InstallDirDlg" Condition="1" />
         </Control>
 
         <Control Id="Cancel"
@@ -115,7 +112,7 @@
                  X="304" Y="243" Width="56" Height="17"
                  Cancel="yes"
                  Text="!(loc.WixUICancel)">
-          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+          <Publish Event="SpawnDialog" Value="CancelDlg" Condition="1" />
         </Control>
 
       </Dialog>

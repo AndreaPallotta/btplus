@@ -177,18 +177,18 @@
     ────────────────────────────────────────────────────────────────────────── -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER">
       <!-- WelcomeDlg Next → BtConfigDlg (instead of InstallDirDlg) -->
-      <Publish Dialog="WelcomeDlg"
-               Control="Next"
-               Event="NewDialog"
-               Value="BtConfigDlg"
-               Order="9999" />
+      <ui:Publish Dialog="WelcomeDlg"
+                  Control="Next"
+                  Event="NewDialog"
+                  Value="BtConfigDlg"
+                  Order="9999" />
 
       <!-- InstallDirDlg Back → BtConfigDlg (instead of WelcomeDlg) -->
-      <Publish Dialog="InstallDirDlg"
-               Control="Back"
-               Event="NewDialog"
-               Value="BtConfigDlg"
-               Order="9999" />
+      <ui:Publish Dialog="InstallDirDlg"
+                  Control="Back"
+                  Event="NewDialog"
+                  Value="BtConfigDlg"
+                  Order="9999" />
     </ui:WixUI>
 
   </Package>
