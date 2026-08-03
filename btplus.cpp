@@ -15,6 +15,27 @@
 #pragma comment(lib, "Bthprops.lib")
 #pragma comment(lib, "Shell32.lib")
 
+// ─── Bluetooth profile UUIDs ─────────────────────────────────────────────────
+// These are standard Bluetooth SIG UUIDs. AudioSinkServiceClass_UUID is usually
+// defined in bthdef.h, but HandsFreeServiceClass_UUID is absent from many
+// Windows SDK versions — define both defensively with #ifndef guards.
+
+#ifndef AudioSinkServiceClass_UUID
+// A2DP Audio Sink — 0x110B
+static const GUID AudioSinkServiceClass_UUID = {
+    0x110B, 0x0000, 0x1000,
+    { 0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB }
+};
+#endif
+
+#ifndef HandsFreeServiceClass_UUID
+// HFP Hands-Free — 0x111E
+static const GUID HandsFreeServiceClass_UUID = {
+    0x111E, 0x0000, 0x1000,
+    { 0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB }
+};
+#endif
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 // Custom window messages
