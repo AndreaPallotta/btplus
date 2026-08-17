@@ -12,7 +12,7 @@ btplus runs silently in the background as a login startup task. It:
 4. Shows a Windows notification on success or failure
 5. Retries up to 3 times (10 s apart) if the first attempt fails
 
-## Install (recommended — MSI wizard)
+## Install (recommended: MSI wizard)
 
 Download `btplus-vX.X.X.msi` from the [Releases](../../releases) page and run it.
 
@@ -37,7 +37,7 @@ Start-ScheduledTask -TaskName "btplus"
 
 ### Uninstall
 
-Use **Add or Remove Programs** — the uninstaller automatically stops btplus and removes the scheduled task.
+Use **Add or Remove Programs** - the uninstaller automatically stops btplus and removes the scheduled task.
 
 ---
 
@@ -103,7 +103,7 @@ wix build installer/btplus.wxs installer/BtConfigDlg.wxs `
 
 | File | Description |
 |---|---|
-| `btplus.cpp` | Main source — message loop, BT detection, notifications |
+| `btplus.cpp` | Main source - message loop, BT detection, notifications |
 | `btplus.ini` | Runtime configuration (device name, poll interval) |
 | `installer/btplus.wxs` | WiX package: components, custom actions, UI wiring |
 | `installer/BtConfigDlg.wxs` | Custom "Configure btplus" wizard dialog |
